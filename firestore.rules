@@ -1,0 +1,61 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function member(groupId) {
+      return signedIn() && exists(/databases/$(database)/documents/groups/$(groupId)/members/$(request.auth.uid));
+    }
+    function validGeo(data) {
+      return data.centerLatitude is number && data.centerLatitude >= -90 && data.centerLatitude <= 90
+        && data.centerLongitude is number && data.centerLongitude >= -180 && data.centerLongitude <= 180
+        && data.radiusMeters is number && data.radiusMeters > 0 && data.radiusMeters <= 100000;
+    }
+    function validMember(data, userId) {
+      return data.userId == userId && data.displayName is string
+        && data.displayName.size() > 0 && data.displayName.size() <= 60
+        && data.isTracking is bool
+        && data.keys().hasOnly(['userId', 'displayName', 'isTracking', 'latitude', 'longitude', 'lastLocationAt', 'isInsideGeofence', 'processedLocationAt', 'evaluatedAt']);
+    }
+
+    match /groups/{groupId} {
+      allow get: if member(groupId);
+      allow list, delete: if false;
+      allow create: if signedIn() && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.groupId == groupId
+        && request.resource.data.groupName is string
+        && request.resource.data.groupName.size() > 0 && request.resource.data.groupName.size() <= 60
+        && validGeo(request.resource.data)
+        && request.resource.data.keys().hasOnly(['groupId', 'groupName', 'createdBy', 'centerLatitude', 'centerLongitude', 'radiusMeters', 'createdAt']);
+      allow update: if signedIn() && resource.data.createdBy == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['centerLatitude', 'centerLongitude', 'radiusMeters'])
+        && validGeo(request.resource.data);
+
+      match /members/{userId} {
+        allow read: if member(groupId);
+        allow create: if signedIn() && request.auth.uid == userId && validMember(request.resource.data, userId)
+          && ((existsAfter(/databases/$(database)/documents/groups/$(groupId))
+               && getAfter(/databases/$(database)/documents/groups/$(groupId)).data.createdBy == userId)
+              || (exists(/databases/$(database)/documents/joinCodes/$(groupId))
+                  && get(/databases/$(database)/documents/joinCodes/$(groupId)).data.groupId == groupId));
+        allow update: if member(groupId) && request.auth.uid == userId
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'displayName', 'latitude', 'longitude', 'lastLocationAt', 'isTracking'
+          ])
+          && validMember(request.resource.data, userId)
+          && (!('latitude' in request.resource.data) || (request.resource.data.latitude is number && request.resource.data.latitude >= -90 && request.resource.data.latitude <= 90))
+          && (!('longitude' in request.resource.data) || (request.resource.data.longitude is number && request.resource.data.longitude >= -180 && request.resource.data.longitude <= 180))
+          && (!('lastLocationAt' in request.resource.data) || request.resource.data.lastLocationAt is timestamp);
+        allow delete: if false;
+      }
+    }
+
+    match /joinCodes/{code} {
+      allow get: if signedIn() && code.matches('^[A-F0-9]{12}$');
+      allow list, delete, update: if false;
+      allow create: if signedIn() && code.matches('^[A-F0-9]{12}$')
+        && request.resource.data.keys().hasOnly(['groupId']) && request.resource.data.groupId == code
+        && existsAfter(/databases/$(database)/documents/groups/$(code))
+        && getAfter(/databases/$(database)/documents/groups/$(code)).data.createdBy == request.auth.uid;
+    }
+  }
+}
